@@ -1,0 +1,78 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: kairo-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis_data:/data
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: kairo-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: kairo
+      POSTGRES_PASSWORD: kairopassword
+      POSTGRES_DB: kairo
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kairo -d kairo"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: ../../
+      dockerfile: deploy/compose/Dockerfile
+      args:
+        TARGET_CMD: api
+    container_name: kairo-api
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      KAIRO_ENV: "development"
+      KAIRO_LOG_LEVEL: "info"
+      KAIRO_REDIS_URL: "redis://redis:6379"
+      KAIRO_DATABASE_URL: "postgres://kairo:kairopassword@postgres:5432/kairo?sslmode=disable"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ../../
+      dockerfile: deploy/compose/Dockerfile
+      args:
+        TARGET_CMD: worker
+    container_name: kairo-worker
+    environment:
+      KAIRO_ENV: "development"
+      KAIRO_LOG_LEVEL: "info"
+      KAIRO_REDIS_URL: "redis://redis:6379"
+      KAIRO_DATABASE_URL: "postgres://kairo:kairopassword@postgres:5432/kairo?sslmode=disable"
+      KAIRO_WORKER_CONCURRENCY: "4"
+      KAIRO_RUNTIME: "runc"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  redis_data:
+  postgres_data:
