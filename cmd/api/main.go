@@ -38,7 +38,9 @@ func main() {
 		os.Exit(1)
 	}
 	rdb := redis.NewClient(opt)
-	defer rdb.Close()
+	defer func() {
+		_ = rdb.Close()
+	}()
 
 	healthHandler := api.NewHealthHandler(rdb, cfg.DatabaseURL)
 

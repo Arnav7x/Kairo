@@ -8,8 +8,8 @@ import (
 
 func TestConfigDefaults(t *testing.T) {
 	// Clear any overrides for test
-	os.Unsetenv("KAIRO_REDIS_URL")
-	os.Unsetenv("KAIRO_RUNTIME")
+	_ = os.Unsetenv("KAIRO_REDIS_URL")
+	_ = os.Unsetenv("KAIRO_RUNTIME")
 
 	cfg, err := LoadFromEnv()
 	if err != nil {

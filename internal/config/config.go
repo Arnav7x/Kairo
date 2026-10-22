@@ -11,13 +11,13 @@ import (
 // Config holds all platform configurations loaded from environment variables.
 type Config struct {
 	// Service
-	Port           string
-	Environment    string
-	LogLevel       string
+	Port        string
+	Environment string
+	LogLevel    string
 
 	// Redis & DB
-	RedisURL       string
-	DatabaseURL    string
+	RedisURL    string
+	DatabaseURL string
 
 	// Runtime & Worker
 	Runtime           string        // "runc" or "runsc"
@@ -25,11 +25,11 @@ type Config struct {
 	ReaperMaxAge      time.Duration // default 5m
 
 	// Resource ceilings
-	MaxTimeoutMS     int64 // default 30000 ms
-	MaxMemoryMB      int64 // default 1024 MB
-	MaxOutputBytes   int64 // default 1048576 (1 MB)
-	MaxSourceBytes   int64 // default 262144 (256 KB)
-	SeccompProfile   string
+	MaxTimeoutMS   int64 // default 30000 ms
+	MaxMemoryMB    int64 // default 1024 MB
+	MaxOutputBytes int64 // default 1048576 (1 MB)
+	MaxSourceBytes int64 // default 262144 (256 KB)
+	SeccompProfile string
 }
 
 // LoadFromEnv parses environment variables with default fallbacks and validation.

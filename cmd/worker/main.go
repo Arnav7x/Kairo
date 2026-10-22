@@ -34,7 +34,9 @@ func main() {
 		os.Exit(1)
 	}
 	rdb := redis.NewClient(opt)
-	defer rdb.Close()
+	defer func() {
+		_ = rdb.Close()
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
