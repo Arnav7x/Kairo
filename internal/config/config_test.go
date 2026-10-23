@@ -1,15 +1,14 @@
 package config
 
 import (
-	"os"
 	"testing"
 	"time"
 )
 
 func TestConfigDefaults(t *testing.T) {
 	// Clear any overrides for test
-	_ = os.Unsetenv("KAIRO_REDIS_URL")
-	_ = os.Unsetenv("KAIRO_RUNTIME")
+	t.Setenv("KAIRO_REDIS_URL", "")
+	t.Setenv("KAIRO_RUNTIME", "")
 
 	cfg, err := LoadFromEnv()
 	if err != nil {

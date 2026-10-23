@@ -44,11 +44,11 @@ func NewRegistry() *Registry {
 		CompileCmd: nil, // Interpreted
 		RunCmd:     []string{"python3", "main.py"},
 		DefaultLimits: Limits{
-			TimeoutMS:    10000,               // 10s default
-			MemoryMB:     256,                 // 256MB default
-			OutputBytes:  1048576,             // 1MB default
-			CPUNanoCores: 500_000_000,         // 0.5 CPU default
-			PidsLimit:    64,                  // 64 processes
+			TimeoutMS:    10000,       // 10s default
+			MemoryMB:     256,         // 256MB default
+			OutputBytes:  1048576,     // 1MB default
+			CPUNanoCores: 500_000_000, // 0.5 CPU default
+			PidsLimit:    64,          // 64 processes
 		},
 	})
 

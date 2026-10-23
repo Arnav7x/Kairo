@@ -39,7 +39,9 @@ func main() {
 	}
 	rdb := redis.NewClient(opt)
 	defer func() {
-		_ = rdb.Close()
+		if err := rdb.Close(); err != nil {
+			logger.Error("failed to close Redis client", "error", err)
+		}
 	}()
 
 	healthHandler := api.NewHealthHandler(rdb, cfg.DatabaseURL)

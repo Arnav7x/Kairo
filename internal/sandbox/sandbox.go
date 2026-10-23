@@ -43,13 +43,13 @@ type ExecutionSpec struct {
 
 // ExecutionResult holds the outcome of a sandbox execution.
 type ExecutionResult struct {
-	Status           TerminalStatus
-	ExitCode         int
-	Stdout           string
-	Stderr           string
-	Duration         time.Duration
-	PeakMemoryBytes  uint64
-	ErrorMessage     string
+	Status          TerminalStatus
+	ExitCode        int
+	Stdout          string
+	Stderr          string
+	Duration        time.Duration
+	PeakMemoryBytes uint64
+	ErrorMessage    string
 }
 
 // Executor interface for executing code sandboxes.
