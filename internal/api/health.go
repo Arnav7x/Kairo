@@ -58,14 +58,15 @@ func (h *HealthHandler) Readyz(w http.ResponseWriter, r *http.Request) {
 			checks["postgres"] = "unhealthy: " + err.Error()
 			allHealthy = false
 		} else {
-			defer func() {
-				_ = conn.Close(ctx)
-			}()
 			if err := conn.Ping(ctx); err != nil {
 				checks["postgres"] = "unhealthy: " + err.Error()
 				allHealthy = false
 			} else {
 				checks["postgres"] = "ok"
+			}
+			if err := conn.Close(ctx); err != nil {
+				checks["postgres"] = "unhealthy: failed to close connection: " + err.Error()
+				allHealthy = false
 			}
 		}
 	} else {
