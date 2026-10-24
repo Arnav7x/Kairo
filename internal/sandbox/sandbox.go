@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/Arnav7x/kairo/internal/events"
 	"github.com/Arnav7x/kairo/internal/languages"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -39,6 +40,7 @@ type ExecutionSpec struct {
 	Stdin      string
 	Args       []string
 	Limits     languages.Limits
+	EventSink  events.Sink
 }
 
 // ExecutionResult holds the outcome of a sandbox execution.
@@ -223,11 +225,38 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 		}, nil
 	}
 
-	// 7. Wait for container execution or timeout
+	// 7. Stream and demultiplex output while the program runs.
+	maxOutput := spec.Limits.OutputBytes
+	if maxOutput <= 0 {
+		maxOutput = 1048576 // 1MB default
+	}
+	limitCh := make(chan struct{}, 1)
+	collector := newOutputCollector(context.Background(), spec.JobID, maxOutput, spec.EventSink, limitCh)
+
+	logReader, err := d.dockerClient.ContainerLogs(context.Background(), containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     true,
+	})
+	if err != nil {
+		return &ExecutionResult{
+			Status:       StatusInternalError,
+			ErrorMessage: fmt.Sprintf("failed to stream container logs: %v", err),
+			Duration:     time.Since(startTime),
+		}, nil
+	}
+	logDone := make(chan error, 1)
+	go func() {
+		_, err := stdcopy.StdCopy(collector.writer(events.StreamStdout), collector.writer(events.StreamStderr), logReader)
+		logDone <- err
+	}()
+
+	// 8. Wait for container execution, timeout, or the live output cap.
 	statusCh, errCh := d.dockerClient.ContainerWait(execCtx, containerID, container.WaitConditionNotRunning)
 
 	var exitCode int
 	var timeoutKilled bool
+	var outputLimited bool
 
 	select {
 	case err := <-errCh:
@@ -254,9 +283,51 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 		killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = d.dockerClient.ContainerKill(killCtx, containerID, "SIGKILL")
 		killCancel()
+	case <-limitCh:
+		outputLimited = true
+		killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = d.dockerClient.ContainerKill(killCtx, containerID, "SIGKILL")
+		killCancel()
+	}
+	if timeoutKilled || outputLimited {
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		statusCh, errCh := d.dockerClient.ContainerWait(waitCtx, containerID, container.WaitConditionNotRunning)
+		select {
+		case waitResp := <-statusCh:
+			exitCode = int(waitResp.StatusCode)
+		case err := <-errCh:
+			if err != nil {
+				// Docker can report the expected kill as a wait error. The terminal
+				// status below still takes precedence over this conventional code.
+				exitCode = 137
+			}
+		case <-waitCtx.Done():
+		}
+		waitCancel()
 	}
 
-	// 8. Inspect container for OOM kill and exit status
+	// Wait for the followed stream to finish, then flush the final partial frame.
+	var logErr error
+	select {
+	case logErr = <-logDone:
+	case <-time.After(5 * time.Second):
+		_ = logReader.Close()
+		logErr = <-logDone
+	}
+	_ = logReader.Close()
+	stdout, stderr, collectorLimited := collector.close()
+	outputLimited = outputLimited || collectorLimited
+	if logErr != nil && !outputLimited {
+		return &ExecutionResult{
+			Status:       StatusInternalError,
+			ErrorMessage: fmt.Sprintf("failed to stream container logs: %v", logErr),
+			Stdout:       stdout,
+			Stderr:       stderr,
+			Duration:     time.Since(startTime),
+		}, nil
+	}
+
+	// 9. Inspect container for OOM kill and exit status
 	inspectCtx, inspectCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer inspectCancel()
 	inspect, err := d.dockerClient.ContainerInspect(inspectCtx, containerID)
@@ -269,37 +340,14 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 		}
 	}
 
-	// 9. Collect output logs (demultiplex stdout & stderr)
-	logsCtx, logsCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer logsCancel()
-
-	logReader, err := d.dockerClient.ContainerLogs(logsCtx, containerID, container.LogsOptions{
-		ShowStdout: true,
-		ShowStderr: true,
-	})
-
-	var stdoutBuf, stderrBuf bytes.Buffer
-	if err == nil {
-		defer func() {
-			_ = logReader.Close()
-		}()
-		_, _ = stdcopy.StdCopy(&stdoutBuf, &stderrBuf, logReader)
-	}
-
 	duration := time.Since(startTime)
 
-	// Check output limits
-	maxOutput := spec.Limits.OutputBytes
-	if maxOutput <= 0 {
-		maxOutput = 1048576 // 1MB default
-	}
-
-	if int64(stdoutBuf.Len()+stderrBuf.Len()) > maxOutput {
+	if outputLimited {
 		return &ExecutionResult{
 			Status:   StatusOutputLimit,
 			ExitCode: exitCode,
-			Stdout:   stdoutBuf.String(),
-			Stderr:   stderrBuf.String(),
+			Stdout:   stdout,
+			Stderr:   stderr,
 			Duration: duration,
 		}, nil
 	}
@@ -309,6 +357,8 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 	switch {
 	case oomKilled:
 		finalStatus = StatusOOMKilled
+	case outputLimited:
+		finalStatus = StatusOutputLimit
 	case timeoutKilled:
 		finalStatus = StatusTimeout
 	case exitCode == 0:
@@ -320,8 +370,8 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 	return &ExecutionResult{
 		Status:   finalStatus,
 		ExitCode: exitCode,
-		Stdout:   stdoutBuf.String(),
-		Stderr:   stderrBuf.String(),
+		Stdout:   stdout,
+		Stderr:   stderr,
 		Duration: duration,
 	}, nil
 }

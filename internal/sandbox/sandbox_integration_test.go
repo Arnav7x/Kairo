@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/Arnav7x/kairo/internal/events"
 	"github.com/Arnav7x/kairo/internal/languages"
 	"github.com/Arnav7x/kairo/internal/sandbox"
 	"github.com/docker/docker/api/types/container"
@@ -32,6 +34,24 @@ func newTestDockerClient(t *testing.T) *client.Client {
 		t.Fatalf("failed to connect to Docker: %v", err)
 	}
 	return cli
+}
+
+type integrationSink struct {
+	mu     sync.Mutex
+	events []events.Event
+}
+
+func (s *integrationSink) Publish(_ context.Context, event events.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, event)
+	return nil
+}
+
+func (s *integrationSink) snapshot() []events.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]events.Event(nil), s.events...)
 }
 
 // Acceptance 1: print('hello') returns stdout hello, exit 0
@@ -214,6 +234,78 @@ except Exception:
 	}
 
 	assertNoOrphanContainers(t, cli)
+}
+
+// Acceptance 6: output is emitted as the process produces it, not at exit.
+func TestAcceptance_LiveOutputStreaming(t *testing.T) {
+	cli := newTestDockerClient(t)
+	defer func() { _ = cli.Close() }()
+
+	py, err := languages.NewRegistry().Get("python")
+	if err != nil {
+		t.Fatalf("get python config: %v", err)
+	}
+	sink := &integrationSink{}
+	s := sandbox.NewDockerSandbox(cli, "runc", "../../deploy/compose/seccomp.json")
+	res, err := s.Run(context.Background(), sandbox.ExecutionSpec{
+		JobID:    "test-live-streaming",
+		Language: py,
+		SourceCode: `import time
+for i in range(3):
+    print(f"tick {i}", flush=True)
+    time.sleep(1)`,
+		Limits:    py.DefaultLimits,
+		EventSink: sink,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != sandbox.StatusCompleted {
+		t.Fatalf("expected completed status, got %s", res.Status)
+	}
+
+	got := sink.snapshot()
+	if len(got) != 3 {
+		t.Fatalf("expected one event per printed line, got %#v", got)
+	}
+	for i, event := range got {
+		if event.Stream != events.StreamStdout || !strings.Contains(event.Data, fmt.Sprintf("tick %d", i)) {
+			t.Fatalf("unexpected event %d: %#v", i, event)
+		}
+		if i > 0 && event.Timestamp.Sub(got[i-1].Timestamp) < 800*time.Millisecond {
+			t.Fatalf("events were batched: spacing between events %d and %d was %s", i-1, i, event.Timestamp.Sub(got[i-1].Timestamp))
+		}
+	}
+}
+
+// Acceptance 7: the live collector kills executions exceeding the output cap.
+func TestAcceptance_OutputLimitStopsExecution(t *testing.T) {
+	cli := newTestDockerClient(t)
+	defer func() { _ = cli.Close() }()
+
+	py, err := languages.NewRegistry().Get("python")
+	if err != nil {
+		t.Fatalf("get python config: %v", err)
+	}
+	limits := py.DefaultLimits
+	limits.OutputBytes = 512
+	s := sandbox.NewDockerSandbox(cli, "runc", "../../deploy/compose/seccomp.json")
+	res, err := s.Run(context.Background(), sandbox.ExecutionSpec{
+		JobID:      "test-output-limit",
+		Language:   py,
+		SourceCode: "import sys\nwhile True:\n    print('x' * 512, flush=True)",
+		Limits:     limits,
+		EventSink:  &integrationSink{},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != sandbox.StatusOutputLimit {
+		t.Fatalf("expected output_limit, got %s (stderr: %s)", res.Status, res.Stderr)
+	}
+	if len(res.Stdout)+len(res.Stderr) > int(limits.OutputBytes) {
+		t.Fatalf("collected output exceeded cap: %d > %d", len(res.Stdout)+len(res.Stderr), limits.OutputBytes)
+	}
 }
 
 func assertNoOrphanContainers(t *testing.T, cli *client.Client) {

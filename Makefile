@@ -1,4 +1,4 @@
-.PHONY: up down restart ps logs test lint build runners clean help
+.PHONY: up down restart ps logs test test-integration lint build runners clean help
 
 SHELL := /bin/bash
 COMPOSE_FILE := deploy/compose/docker-compose.yml
@@ -22,6 +22,9 @@ logs: ## Tail logs for all services
 
 test: ## Run Go unit tests with race detection
 	go test -v -race ./...
+
+test-integration: runners ## Run Docker-backed sandbox acceptance tests
+	go test -v -tags=integration -race ./internal/sandbox
 
 lint: ## Run golangci-lint
 	golangci-lint run ./...
