@@ -257,13 +257,15 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 	var exitCode int
 	var timeoutKilled bool
 	var outputLimited bool
+	var cancelled bool
 
 	select {
 	case err := <-errCh:
 		if err != nil {
 			// Check if context timed out
 			if execCtx.Err() != nil {
-				timeoutKilled = true
+				cancelled = ctx.Err() != nil
+				timeoutKilled = !cancelled
 				// Kill container
 				killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
 				_ = d.dockerClient.ContainerKill(killCtx, containerID, "SIGKILL")
@@ -279,7 +281,8 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 	case waitResp := <-statusCh:
 		exitCode = int(waitResp.StatusCode)
 	case <-execCtx.Done():
-		timeoutKilled = true
+		cancelled = ctx.Err() != nil
+		timeoutKilled = !cancelled
 		killCtx, killCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = d.dockerClient.ContainerKill(killCtx, containerID, "SIGKILL")
 		killCancel()
@@ -289,7 +292,7 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 		_ = d.dockerClient.ContainerKill(killCtx, containerID, "SIGKILL")
 		killCancel()
 	}
-	if timeoutKilled || outputLimited {
+	if timeoutKilled || outputLimited || cancelled {
 		waitCtx, waitCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		statusCh, errCh := d.dockerClient.ContainerWait(waitCtx, containerID, container.WaitConditionNotRunning)
 		select {
@@ -359,6 +362,8 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 		finalStatus = StatusOOMKilled
 	case outputLimited:
 		finalStatus = StatusOutputLimit
+	case cancelled:
+		finalStatus = StatusCancelled
 	case timeoutKilled:
 		finalStatus = StatusTimeout
 	case exitCode == 0:
