@@ -1,0 +1,10 @@
+{
+  "name": "kairo",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "check": "npm run check --workspaces",
+    "test": "npm run test --workspaces"
+  }
+}

@@ -23,5 +23,5 @@ coverage.txt
 .DS_Store
 
 # Frontend
-web/node_modules/
-web/dist/
+node_modules/
+apps/*/dist/

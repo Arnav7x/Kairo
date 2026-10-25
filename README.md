@@ -1,18 +1,18 @@
 # Kairo (回路)
 
-Kairo is a remote Docker sandbox platform for executing untrusted code securely with real-time streamed output over WebSockets and horizontal Redis-backed queue scaling.
+Kairo is a remote Docker sandbox platform for executing untrusted code securely with real-time streamed output and horizontal Redis-backed queue scaling.
 
 ## Architecture Overview
 
 ```text
 ┌──────────┐   HTTPS/WS   ┌──────────────┐    XADD     ┌───────────────┐
 │ Browser  │─────────────▶│  Kairo API   │────────────▶│ Redis Stream  │
-│ (React)  │◀─────────────│  (Go, chi)   │             │  kairo:jobs   │
+│ (React)  │◀─────────────│ (TypeScript) │             │  kairo:jobs   │
 └──────────┘  live logs   └──────┬───────┘             └───────┬───────┘
                                  │ subscribe                   │ XREADGROUP
                                  ▼                             ▼
                           ┌──────────────┐             ┌───────────────┐
-                          │ Redis PubSub │◀────────────│ Kairo Worker  │
+│ Redis PubSub │◀────────────│ Kairo Worker  │
                           │  + job logs  │   publish   │     (Go)      │
                           └──────────────┘             └───────┬───────┘
                                                                │ Docker API
@@ -34,7 +34,8 @@ Kairo is a remote Docker sandbox platform for executing untrusted code securely 
 
 ### Prerequisites
 - [Docker](https://docs.docker.com/get-docker/) & Docker Compose
-- [Go 1.22+](https://golang.org/dl/) (for local development)
+- [Node.js 24+](https://nodejs.org/) (for the TypeScript API and React UI)
+- [Go 1.26+](https://go.dev/dl/) (for the sandbox worker)
 - [golangci-lint](https://golangci-lint.run/)
 
 ### Running the Stack with Docker Compose
@@ -66,6 +67,12 @@ make test
 
 # Run linter
 make lint
+
+# Check, test, and build the TypeScript API/UI
+npm ci
+npm run check
+npm test
+npm run build
 
 # Build local binaries
 make build

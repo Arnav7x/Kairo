@@ -33,9 +33,7 @@ services:
   api:
     build:
       context: ../../
-      dockerfile: deploy/compose/Dockerfile
-      args:
-        TARGET_CMD: api
+      dockerfile: deploy/compose/typescript-api.Dockerfile
     container_name: kairo-api
     ports:
       - "8080:8080"
