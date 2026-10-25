@@ -24,7 +24,7 @@ test: ## Run Go unit tests with race detection
 	go test -v -race ./...
 
 test-integration: runners ## Run Docker-backed sandbox acceptance tests
-	go test -v -tags=integration -race ./internal/sandbox
+	go test -v -tags=integration -race ./internal/sandbox ./internal/worker
 
 lint: ## Run golangci-lint
 	golangci-lint run ./...

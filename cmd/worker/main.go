@@ -9,7 +9,11 @@ import (
 	"time"
 
 	"github.com/Arnav7x/kairo/internal/config"
+	"github.com/Arnav7x/kairo/internal/languages"
 	"github.com/Arnav7x/kairo/internal/observability"
+	"github.com/Arnav7x/kairo/internal/sandbox"
+	"github.com/Arnav7x/kairo/internal/worker"
+	"github.com/docker/docker/client"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -47,28 +51,37 @@ func main() {
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
 
-	logger.Info("kairo-worker is idle waiting for jobs (Phase 0 foundation ready)")
+	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		logger.Error("failed to create Docker client", "error", err)
+		os.Exit(1)
+	}
+	defer func() { _ = dockerClient.Close() }()
 
-	// Worker heartbeat / background loop simulator until Phase 3
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+	name, err := os.Hostname()
+	if err != nil {
+		name = fmt.Sprintf("worker-%d", os.Getpid())
+	}
+	executor := sandbox.NewDockerSandbox(dockerClient, cfg.Runtime, cfg.SeccompProfile)
+	runner := worker.New(rdb, executor, languages.NewRegistry(), worker.Options{
+		ConsumerName: name,
+		Concurrency:  cfg.WorkerConcurrency,
+		ClaimAfter:   time.Duration(cfg.MaxTimeoutMS)*time.Millisecond + 5*time.Second,
+		Reap: func(reapCtx context.Context) error {
+			return sandbox.CleanOrphanedContainers(reapCtx, dockerClient, cfg.ReaperMaxAge)
+		},
+	})
 
 	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				logger.Debug("worker heartbeat tick")
-			}
-		}
+		sig := <-shutdown
+		logger.Info("received shutdown signal, draining worker...", "signal", sig.String())
+		cancel()
 	}()
 
-	sig := <-shutdown
-	logger.Info("received shutdown signal, draining worker...", "signal", sig.String())
-	cancel()
-
-	// Wait brief interval to finish active tasks
-	time.Sleep(500 * time.Millisecond)
+	logger.Info("kairo-worker is consuming jobs")
+	if err := runner.Run(ctx); err != nil {
+		logger.Error("worker stopped with error", "error", err)
+		os.Exit(1)
+	}
 	logger.Info("kairo-worker drained and exited cleanly")
 }

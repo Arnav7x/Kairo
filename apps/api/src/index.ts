@@ -18,6 +18,9 @@ const app = createApp({
   pingPostgres: async () => {
     await postgres.query("SELECT 1");
   },
+  enqueue: async (job) => {
+    await redis.xAdd("kairo:jobs", "*", { job: JSON.stringify(job) });
+  },
 });
 
 if (process.env.WEB_DIST_DIR) {
