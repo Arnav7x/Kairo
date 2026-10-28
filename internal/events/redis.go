@@ -35,13 +35,23 @@ func (s *RedisSink) Publish(ctx context.Context, event Event) error {
 		return fmt.Errorf("marshal event: %w", err)
 	}
 
-	if err := s.client.XAdd(ctx, &redis.XAddArgs{
+	entryID, err := s.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: StreamKey(event.JobID),
 		Values: map[string]any{"event": string(payload)},
-	}).Err(); err != nil {
+	}).Result()
+	if err != nil {
 		return fmt.Errorf("append event to stream: %w", err)
 	}
-	if err := s.client.Publish(ctx, ChannelKey(event.JobID), payload).Err(); err != nil {
+
+	if event.ID == "" {
+		event.ID = entryID
+	}
+	livePayload, err := json.Marshal(event)
+	if err != nil {
+		livePayload = payload
+	}
+
+	if err := s.client.Publish(ctx, ChannelKey(event.JobID), livePayload).Err(); err != nil {
 		return fmt.Errorf("publish live event: %w", err)
 	}
 	return nil

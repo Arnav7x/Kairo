@@ -18,6 +18,7 @@ const (
 
 // Event is a chunk of output produced by a sandboxed job.
 type Event struct {
+	ID        string    `json:"id,omitempty"`
 	JobID     string    `json:"job_id"`
 	Stream    Stream    `json:"stream"`
 	Data      string    `json:"data"`
