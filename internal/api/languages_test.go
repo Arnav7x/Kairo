@@ -16,7 +16,7 @@ func TestLanguagesHandlerUsesRegistry(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d", res.Code)
 	}
-	if got := res.Body.String(); !(strings.Contains(got, `"id":"node"`) && strings.Contains(got, `"id":"java"`)) {
+	if got := res.Body.String(); !strings.Contains(got, `"id":"node"`) || !strings.Contains(got, `"id":"java"`) {
 		t.Fatalf("response does not contain registry entries: %s", got)
 	}
 }
