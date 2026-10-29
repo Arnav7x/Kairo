@@ -188,7 +188,12 @@ func (d *DockerSandbox) runPhase(ctx context.Context, spec ExecutionSpec, worksp
 			},
 		},
 		Tmpfs: map[string]string{
-			"/tmp": "rw,noexec,nosuid,size=16m",
+			// Compiler toolchains need scratch space. Keep it non-executable and
+			// bounded, but use the conventional sticky /tmp permissions so the
+			// unprivileged sandbox user can create its own files.
+			// Go's compiler cache alone can exceed 16 MiB; this remains bounded
+			// independently of the container's memory limit.
+			"/tmp": "rw,noexec,nosuid,size=128m,mode=1777",
 		},
 	}
 

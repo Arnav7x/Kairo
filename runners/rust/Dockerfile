@@ -11,8 +11,7 @@ RUN apk add --no-cache musl-dev gcc && \
 USER 10001:10001
 WORKDIR /workspace
 
-ENV CARGO_HOME=/tmp/cargo \
-    RUSTUP_HOME=/tmp/rustup
+ENV CARGO_HOME=/tmp/cargo
 
 CMD ["./main"]
 

@@ -125,13 +125,13 @@ languages:
     run_cmd:
       - "./main"
     default_limits:
-      timeout_ms: 10000
+      timeout_ms: 90000
       memory_mb: 512
       output_bytes: 1048576
       cpu_nano_cores: 500000000
       pids_limit: 64
     compile_limits:
-      timeout_ms: 8000
+      timeout_ms: 60000
       memory_mb: 256
       output_bytes: 1048576
       cpu_nano_cores: 1000000000
