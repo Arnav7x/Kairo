@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Arnav7x/kairo/internal/events"
@@ -340,6 +341,17 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 		oomKilled = inspect.State.OOMKilled
 		if inspect.State.ExitCode != 0 {
 			exitCode = inspect.State.ExitCode
+		}
+	}
+
+	// Under cgroups v2 on modern Linux (e.g. GitHub Actions runners), Docker ContainerInspect
+	// frequently leaves State.OOMKilled as false when the host kernel OOM killer terminates
+	// the process via SIGKILL (exit code 137). When the sandbox process terminated with exit code 137
+	// and neither our wall-clock timeout nor our output limiter killed it, or when the runtime
+	// threw an unhandled memory exhaustion exception, classify it as oom_killed.
+	if !timeoutKilled && !outputLimited && !cancelled {
+		if exitCode == 137 || strings.Contains(stderr, "MemoryError") {
+			oomKilled = true
 		}
 	}
 
