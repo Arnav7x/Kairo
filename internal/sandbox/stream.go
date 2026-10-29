@@ -18,6 +18,7 @@ const (
 type outputCollector struct {
 	ctx       context.Context
 	jobID     string
+	phase     string
 	maxOutput int64
 	sink      events.Sink
 	limitCh   chan<- struct{}
@@ -31,10 +32,11 @@ type outputCollector struct {
 	doneTick chan struct{}
 }
 
-func newOutputCollector(ctx context.Context, jobID string, maxOutput int64, sink events.Sink, limitCh chan<- struct{}) *outputCollector {
+func newOutputCollector(ctx context.Context, jobID string, phase string, maxOutput int64, sink events.Sink, limitCh chan<- struct{}) *outputCollector {
 	c := &outputCollector{
 		ctx:       ctx,
 		jobID:     jobID,
+		phase:     phase,
 		maxOutput: maxOutput,
 		sink:      sink,
 		limitCh:   limitCh,
@@ -135,7 +137,7 @@ func (c *outputCollector) flushLocked(stream events.Stream) {
 	}
 	// A sink failure must not block or alter the sandbox lifecycle. The stream
 	// remains the source of truth for execution status and cleanup.
-	_ = c.sink.Publish(c.ctx, events.Event{JobID: c.jobID, Stream: stream, Data: data, Timestamp: time.Now().UTC()})
+	_ = c.sink.Publish(c.ctx, events.Event{JobID: c.jobID, Phase: c.phase, Stream: stream, Data: data, Timestamp: time.Now().UTC()})
 }
 
 func (c *outputCollector) close() (stdout, stderr string, limited bool) {

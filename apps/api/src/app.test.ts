@@ -20,6 +20,20 @@ test("health endpoint is always live", async () => {
   await app.close();
 });
 
+test("language endpoint exposes the configured registry", async () => {
+  const app = createApp({
+    ...noOpDependencies,
+    languages: [{ id: "go", name: "Go", compiled: true }, { id: "node", name: "Node.js" }],
+  });
+  const response = await app.inject({ method: "GET", url: "/v1/languages" });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), {
+    languages: [{ id: "go", name: "Go", compiled: true }, { id: "node", name: "Node.js" }],
+  });
+  await app.close();
+});
+
 test("job submission adds a queue payload with clamped limits", async () => {
   let queued: ValidatedJob | undefined;
   const app = createApp({

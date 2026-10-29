@@ -12,6 +12,7 @@ import (
 
 	"github.com/Arnav7x/kairo/internal/api"
 	"github.com/Arnav7x/kairo/internal/config"
+	"github.com/Arnav7x/kairo/internal/languages"
 	"github.com/Arnav7x/kairo/internal/observability"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -53,6 +54,7 @@ func main() {
 
 	r.Get("/healthz", healthHandler.Healthz)
 	r.Get("/readyz", healthHandler.Readyz)
+	r.Get("/v1/languages", api.LanguagesHandler(languages.NewRegistry()))
 
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,

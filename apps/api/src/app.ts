@@ -12,6 +12,7 @@ import {
   TokenBucketLimiter,
 } from "./ratelimit.js";
 import {
+  DEFAULT_CONFIG,
   type LimitsInput,
   type ValidatedJob,
   type ValidationConfig,
@@ -28,6 +29,15 @@ export interface Job {
   limits?: Record<string, number> | LimitsInput;
 }
 
+export interface LanguageInfo {
+  id: string;
+  name?: string;
+  image?: string;
+  filename?: string;
+  compiled?: boolean;
+  aliases?: string[];
+}
+
 export interface AppDependencies {
   pingRedis(): Promise<void>;
   pingPostgres(): Promise<void>;
@@ -39,6 +49,8 @@ export interface AppDependencies {
   postgresPool?: Pool | null;
   rateLimiter?: TokenBucketLimiter;
   validationConfig?: ValidationConfig;
+  /** Registry snapshot supplied by deployment configuration. */
+  languages?: LanguageInfo[];
   requestTimeoutMs?: number;
 }
 
@@ -81,6 +93,12 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   // Health and readiness endpoints
   app.get("/healthz", async () => ({ status: "ok" }));
+
+  // This is deliberately a registry view, rather than a hand-maintained route
+  // list: callers can discover exactly which language IDs submissions accept.
+  app.get("/v1/languages", async () => ({
+    languages: dependencies.languages ?? (dependencies.validationConfig ?? DEFAULT_CONFIG).allowedLanguages.map((id) => ({ id })),
+  }));
 
   app.get("/readyz", async (_request, reply) => {
     const checks: Record<string, string> = {};

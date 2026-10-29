@@ -30,7 +30,7 @@ func (s *fakeSink) snapshot() []events.Event {
 func TestOutputCollectorEmitsNewlineFrames(t *testing.T) {
 	sink := &fakeSink{}
 	limitCh := make(chan struct{}, 1)
-	collector := newOutputCollector(context.Background(), "job-1", 1024, sink, limitCh)
+	collector := newOutputCollector(context.Background(), "job-1", "run", 1024, sink, limitCh)
 
 	if _, err := collector.writer(events.StreamStdout).Write([]byte("first line\nsecond line\n")); err != nil {
 		t.Fatalf("write output: %v", err)
@@ -48,7 +48,7 @@ func TestOutputCollectorEmitsNewlineFrames(t *testing.T) {
 		t.Fatalf("unexpected events: %#v", got)
 	}
 	for _, event := range got {
-		if event.JobID != "job-1" || event.Stream != events.StreamStdout || event.Timestamp.IsZero() {
+		if event.JobID != "job-1" || event.Phase != "run" || event.Stream != events.StreamStdout || event.Timestamp.IsZero() {
 			t.Fatalf("invalid event: %#v", event)
 		}
 	}
@@ -57,7 +57,7 @@ func TestOutputCollectorEmitsNewlineFrames(t *testing.T) {
 func TestOutputCollectorFlushesPartialFrameAndEnforcesCap(t *testing.T) {
 	sink := &fakeSink{}
 	limitCh := make(chan struct{}, 1)
-	collector := newOutputCollector(context.Background(), "job-2", 10, sink, limitCh)
+	collector := newOutputCollector(context.Background(), "job-2", "run", 10, sink, limitCh)
 
 	if _, err := collector.writer(events.StreamStderr).Write([]byte("12345678901")); err != nil {
 		t.Fatalf("write output: %v", err)

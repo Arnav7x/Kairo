@@ -77,6 +77,9 @@ jobs:
       - name: Build runner images
         run: make runners
 
+      - name: Smoke test runner images
+        run: ./scripts/smoke-test-runners.sh
+
       - name: Run sandbox acceptance tests
         run: make test-integration
 
