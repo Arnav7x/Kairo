@@ -141,7 +141,7 @@ func TestAcceptance_OOMKilled(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if res.Status != sandbox.StatusOOMKilled {
-		t.Errorf("expected status oom_killed, got %s", res.Status)
+		t.Errorf("expected status oom_killed, got %s (exitCode=%d, stdout=%q, stderr=%q)", res.Status, res.ExitCode, res.Stdout, res.Stderr)
 	}
 
 	assertNoOrphanContainers(t, cli)

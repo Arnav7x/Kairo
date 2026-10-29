@@ -17,11 +17,11 @@ type LanguageConfig struct {
 
 // Limits defines execution resource caps.
 type Limits struct {
-	TimeoutMS    int64
-	MemoryMB     int64
-	OutputBytes  int64
-	CPUNanoCores int64
-	PidsLimit    int64
+	TimeoutMS    int64 `json:"timeout_ms"`
+	MemoryMB     int64 `json:"memory_mb"`
+	OutputBytes  int64 `json:"output_bytes"`
+	CPUNanoCores int64 `json:"cpu_nano_cores"`
+	PidsLimit    int64 `json:"pids_limit"`
 }
 
 // Registry stores language configurations and prevents dynamic user interpolation into image names or commands.

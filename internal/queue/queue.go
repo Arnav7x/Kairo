@@ -147,9 +147,23 @@ func MarkTerminal(ctx context.Context, client *redis.Client, jobID string, resul
 	if err != nil {
 		return err
 	}
+	terminalEvent, _ := json.Marshal(map[string]any{
+		"event":             "result",
+		"id":                "terminal",
+		"job_id":            jobID,
+		"status":            result.Status,
+		"exit_code":         result.ExitCode,
+		"stdout":            result.Stdout,
+		"stderr":            result.Stderr,
+		"duration_ms":       result.Duration.Milliseconds(),
+		"peak_memory_bytes": result.PeakMemoryBytes,
+		"error_message":     result.ErrorMessage,
+	})
 	pipe := client.TxPipeline()
 	pipe.Set(ctx, terminalKey(jobID), payload, 0)
 	pipe.Del(ctx, processingKey(jobID))
+	pipe.Publish(ctx, fmt.Sprintf("kairo:job:%s:events:live", jobID), terminalEvent)
+	pipe.Publish(ctx, "kairo:jobs:terminal", terminalEvent)
 	_, err = pipe.Exec(ctx)
 	return err
 }
