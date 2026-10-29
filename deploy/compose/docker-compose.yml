@@ -56,6 +56,7 @@ services:
       args:
         TARGET_CMD: worker
     container_name: kairo-worker
+    user: root
     environment:
       KAIRO_ENV: "development"
       KAIRO_LOG_LEVEL: "info"
