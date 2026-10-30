@@ -132,7 +132,7 @@ languages:
       pids_limit: 64
     compile_limits:
       timeout_ms: 60000
-      memory_mb: 256
+      memory_mb: 512
       output_bytes: 1048576
       cpu_nano_cores: 1000000000
       pids_limit: 64
