@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-units"
@@ -81,6 +82,37 @@ func NewDockerSandbox(dockerClient *client.Client, runtime, seccompProfile strin
 
 // Run executes a sandbox container in accordance with Section 6 security hardening.
 func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*ExecutionResult, error) {
+	volumeName, err := d.dockerClient.VolumeCreate(ctx, volume.CreateOptions{
+		Labels: map[string]string{"kairo.job_id": spec.JobID},
+	})
+	if err != nil {
+		return &ExecutionResult{Status: StatusInternalError, ErrorMessage: fmt.Sprintf("create workspace volume: %v", err)}, nil
+	}
+	defer func() {
+		removeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = d.dockerClient.VolumeRemove(removeCtx, volumeName.Name, true)
+	}()
+
+	if spec.Language.Compiled {
+		compileLimits := spec.Limits
+		if spec.Language.CompileLimits != nil {
+			compileLimits = *spec.Language.CompileLimits
+		}
+		compileSpec := spec
+		compileSpec.Limits = compileLimits
+		compileSpec.Language.RunCmd = spec.Language.CompileCmd
+		compileResult, err := d.runPhase(ctx, compileSpec, volumeName.Name, true, "compile")
+		if err != nil || compileResult.Status != StatusCompleted {
+			return compileResult, err
+		}
+	}
+	return d.runPhase(ctx, spec, volumeName.Name, !spec.Language.Compiled, "run")
+}
+
+// runPhase executes exactly one container phase. Compiled languages invoke it
+// once for compilation and once for execution against the same short-lived volume.
+func (d *DockerSandbox) runPhase(ctx context.Context, spec ExecutionSpec, workspaceVolume string, copySource bool, phase string) (*ExecutionResult, error) {
 	startTime := time.Now()
 
 	// 1. Enforce wall-clock timeout outside container
@@ -151,11 +183,17 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 		Mounts: []mount.Mount{
 			{
 				Type:   mount.TypeVolume,
+				Source: workspaceVolume,
 				Target: "/workspace",
 			},
 		},
 		Tmpfs: map[string]string{
-			"/tmp": "rw,noexec,nosuid,size=16m",
+			// Compiler toolchains need scratch space. Keep it non-executable and
+			// bounded, but use the conventional sticky /tmp permissions so the
+			// unprivileged sandbox user can create its own files.
+			// Go's compiler cache alone can exceed 16 MiB; this remains bounded
+			// independently of the container's memory limit.
+			"/tmp": "rw,noexec,nosuid,size=128m,mode=1777",
 		},
 	}
 
@@ -185,22 +223,15 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 		})
 	}()
 
-	// 4. Copy source file into /workspace via Docker Archive API
-	tarArchive, err := createTarArchive(spec.Language.Filename, spec.SourceCode)
-	if err != nil {
-		return &ExecutionResult{
-			Status:       StatusInternalError,
-			ErrorMessage: fmt.Sprintf("failed to archive source code: %v", err),
-			Duration:     time.Since(startTime),
-		}, nil
-	}
-
-	if err := d.dockerClient.CopyToContainer(execCtx, containerID, "/workspace", tarArchive, types.CopyToContainerOptions{}); err != nil {
-		return &ExecutionResult{
-			Status:       StatusInternalError,
-			ErrorMessage: fmt.Sprintf("failed to copy source into container: %v", err),
-			Duration:     time.Since(startTime),
-		}, nil
+	// 4. Copy source once. The compile phase writes its artifact to the shared volume.
+	if copySource {
+		tarArchive, err := createTarArchive(spec.Language.Filename, spec.SourceCode)
+		if err != nil {
+			return &ExecutionResult{Status: StatusInternalError, ErrorMessage: fmt.Sprintf("failed to archive source code: %v", err), Duration: time.Since(startTime)}, nil
+		}
+		if err := d.dockerClient.CopyToContainer(execCtx, containerID, "/workspace", tarArchive, types.CopyToContainerOptions{}); err != nil {
+			return &ExecutionResult{Status: StatusInternalError, ErrorMessage: fmt.Sprintf("failed to copy source into container: %v", err), Duration: time.Since(startTime)}, nil
+		}
 	}
 
 	// 5. Attach stdin if provided
@@ -232,7 +263,7 @@ func (d *DockerSandbox) Run(ctx context.Context, spec ExecutionSpec) (*Execution
 		maxOutput = 1048576 // 1MB default
 	}
 	limitCh := make(chan struct{}, 1)
-	collector := newOutputCollector(context.Background(), spec.JobID, maxOutput, spec.EventSink, limitCh)
+	collector := newOutputCollector(context.Background(), spec.JobID, phase, maxOutput, spec.EventSink, limitCh)
 
 	logReader, err := d.dockerClient.ContainerLogs(context.Background(), containerID, container.LogsOptions{
 		ShowStdout: true,

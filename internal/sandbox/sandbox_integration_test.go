@@ -308,6 +308,66 @@ func TestAcceptance_OutputLimitStopsExecution(t *testing.T) {
 	}
 }
 
+// Phase 5 acceptance: every registered runner handles success, a failing
+// compilation (or parse step), and a non-zero program exit. Compiler output is
+// published as stderr events carrying the compile phase.
+func TestAcceptance_AllLanguageRunners(t *testing.T) {
+	cli := newTestDockerClient(t)
+	defer func() { _ = cli.Close() }()
+
+	tests := []struct {
+		language, hello, badCompile, runtimeError string
+	}{
+		{"python", "print('hello')", "def :", "raise RuntimeError('boom')"},
+		{"node", "console.log('hello')", "function {", "throw new Error('boom')"},
+		{"bash", "echo hello", "if then", "echo boom >&2; exit 7"},
+		{"c", "#include <stdio.h>\nint main(){puts(\"hello\");}", "int main( {", "int main(){return 7;}"},
+		{"cpp", "#include <iostream>\nint main(){std::cout << \"hello\\n\";}", "int main( {", "int main(){return 7;}"},
+		{"go", "package main\nimport \"fmt\"\nfunc main(){fmt.Println(\"hello\")}", "package main\nfunc main( {", "package main\nfunc main(){panic(\"boom\")}"},
+		{"rust", "fn main(){println!(\"hello\");}", "fn main( {", "fn main(){panic!(\"boom\");}"},
+		{"java", "class Main { public static void main(String[] a) { System.out.println(\"hello\"); } }", "class Main {", "class Main { public static void main(String[] a) { throw new RuntimeException(\"boom\"); } }"},
+	}
+
+	reg := languages.NewRegistry()
+	s := sandbox.NewDockerSandbox(cli, "runc", "../../deploy/compose/seccomp.json")
+	for _, tc := range tests {
+		t.Run(tc.language, func(t *testing.T) {
+			lang, err := reg.Get(tc.language)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := func(source string, sink events.Sink) *sandbox.ExecutionResult {
+				res, err := s.Run(context.Background(), sandbox.ExecutionSpec{JobID: fmt.Sprintf("phase5-%s-%d", tc.language, time.Now().UnixNano()), Language: lang, SourceCode: source, Limits: lang.DefaultLimits, EventSink: sink})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return res
+			}
+			if result := run(tc.hello, nil); result.Status != sandbox.StatusCompleted || !strings.Contains(result.Stdout, "hello") {
+				t.Fatalf("hello failed: status=%s stdout=%q stderr=%q", result.Status, result.Stdout, result.Stderr)
+			}
+			sink := &integrationSink{}
+			if result := run(tc.badCompile, sink); result.Status == sandbox.StatusCompleted {
+				t.Fatal("invalid source unexpectedly completed")
+			}
+			if lang.Compiled {
+				found := false
+				for _, event := range sink.snapshot() {
+					if event.Phase == "compile" && event.Stream == events.StreamStderr {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("compiler diagnostics were not emitted as compile stderr events: %#v", sink.snapshot())
+				}
+			}
+			if result := run(tc.runtimeError, nil); result.Status != sandbox.StatusFailed {
+				t.Fatalf("runtime error status=%s stderr=%q", result.Status, result.Stderr)
+			}
+		})
+	}
+}
+
 func assertNoOrphanContainers(t *testing.T, cli *client.Client) {
 	t.Helper()
 	containers, err := cli.ContainerList(context.Background(), container.ListOptions{All: true})
