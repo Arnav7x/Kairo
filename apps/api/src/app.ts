@@ -5,7 +5,7 @@ import Fastify from "fastify";
 import type { Pool } from "pg";
 import type WebSocket from "ws";
 
-import { getJobById, insertJob, updateJobTerminal } from "./db.js";
+import { getJobById, insertJob, listJobs, updateJobTerminal } from "./db.js";
 import {
   checkQueueBackpressure,
   type RedisRateLimiterClient,
@@ -42,10 +42,11 @@ export interface AppDependencies {
   pingRedis(): Promise<void>;
   pingPostgres(): Promise<void>;
   enqueue(job: ValidatedJob): Promise<void>;
-  redisClient?: (WsRedisDependencies & RedisRateLimiterClient & {
-    xLen?(streamKey: string): Promise<number>;
-    get?(key: string): Promise<string | null>;
-  }) | null;
+   redisClient?: (WsRedisDependencies & RedisRateLimiterClient & {
+     xLen?(streamKey: string): Promise<number>;
+     get?(key: string): Promise<string | null>;
+     set?(key: string, value: string): Promise<unknown>;
+   }) | null;
   postgresPool?: Pool | null;
   rateLimiter?: TokenBucketLimiter;
   validationConfig?: ValidationConfig;
@@ -56,7 +57,7 @@ export interface AppDependencies {
 
 export type HealthDependencies = AppDependencies;
 
-export function createApp(dependencies: AppDependencies): FastifyInstance {
+export async function createApp(dependencies: AppDependencies): Promise<FastifyInstance> {
   const app = Fastify({
     logger: true,
     bodyLimit: 1048576, // 1 MB request body limit
@@ -67,19 +68,22 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
   const defaultLimiter = new TokenBucketLimiter();
   const timeoutMs = dependencies.requestTimeoutMs ?? 15000;
 
-  void app.register(cors, {
+  // Plugins must be awaited before routes are declared, otherwise route
+  // options (e.g. `websocket: true`) bypass the plugin's onRoute hook.
+  await app.register(cors, {
     origin: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-API-Key"],
   });
 
-  void app.register(websocket);
+  await app.register(websocket);
 
   // Request timeout hook for HTTP routes (skip WebSocket upgrade requests)
   app.addHook("onRequest", (request, reply, done) => {
     if ((request as FastifyRequest & { ws?: boolean }).ws) {
       return done();
     }
+
     const timer = setTimeout(() => {
       if (!reply.raw.headersSent) {
         void reply.code(504).send({ error: "Gateway Timeout", message: "Request timed out" });
@@ -252,6 +256,55 @@ export function createApp(dependencies: AppDependencies): FastifyInstance {
 
   app.get("/v1/jobs/:id", getJobHandler);
   app.get("/jobs/:id", getJobHandler);
+
+  // Job list handler for run-history views
+  const listJobsHandler = async (
+    request: FastifyRequest<{ Querystring: { limit?: string; status?: string } }>,
+    reply: any,
+  ) => {
+    if (!dependencies.postgresPool) {
+      return reply.code(200).send({ jobs: [] });
+    }
+    try {
+      const limit = Number.parseInt(request.query.limit ?? "25", 10);
+      const rawStatus = (request.query.status ?? "").trim().toLowerCase();
+      const allowedStatuses = ["queued", "running", "completed", "failed", "cancelled", "timeout"];
+      const status = allowedStatuses.includes(rawStatus) ? rawStatus : undefined;
+      const jobs = await listJobs(dependencies.postgresPool, {
+        limit: Number.isNaN(limit) ? undefined : limit,
+        status,
+      });
+      return reply.code(200).send({ jobs });
+    } catch (error) {
+      request.log.error({ error }, "failed to list jobs from Postgres");
+      return reply.code(500).send({ error: "failed to list jobs" });
+    }
+  };
+
+  app.get("/v1/jobs", listJobsHandler);
+  app.get("/jobs", listJobsHandler);
+
+  // Cancellation handler: signals active workers via the per-job cancel key.
+  const cancelJobHandler = async (
+    request: FastifyRequest<{ Params: { id: string } }>,
+    reply: any,
+  ) => {
+    const { id } = request.params;
+    if (!dependencies.redisClient || typeof dependencies.redisClient.set !== "function") {
+      return reply.code(503).send({ error: "cancellation backend unavailable" });
+    }
+    try {
+      const cancelKey = `kairo:job:${id}:cancel`;
+      await dependencies.redisClient.set(cancelKey, "1");
+      return reply.code(202).send({ id, status: "cancelling" });
+    } catch (error) {
+      request.log.error({ error, jobId: id }, "failed to set cancellation key");
+      return reply.code(500).send({ error: "failed to cancel job" });
+    }
+  };
+
+  app.delete("/v1/jobs/:id", cancelJobHandler);
+  app.delete("/jobs/:id", cancelJobHandler);
 
   // WebSocket hub handlers
   const wsRouteHandler = (

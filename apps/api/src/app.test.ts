@@ -12,7 +12,7 @@ const noOpDependencies = {
 };
 
 test("health endpoint is always live", async () => {
-  const app = createApp(noOpDependencies);
+  const app = await createApp(noOpDependencies);
   const response = await app.inject({ method: "GET", url: "/healthz" });
 
   assert.equal(response.statusCode, 200);
@@ -21,7 +21,7 @@ test("health endpoint is always live", async () => {
 });
 
 test("language endpoint exposes the configured registry", async () => {
-  const app = createApp({
+  const app = await createApp({
     ...noOpDependencies,
     languages: [{ id: "go", name: "Go", compiled: true }, { id: "node", name: "Node.js" }],
   });
@@ -36,7 +36,7 @@ test("language endpoint exposes the configured registry", async () => {
 
 test("job submission adds a queue payload with clamped limits", async () => {
   let queued: ValidatedJob | undefined;
-  const app = createApp({
+  const app = await createApp({
     ...noOpDependencies,
     enqueue: async (job) => {
       queued = job;
@@ -65,7 +65,7 @@ test("job submission adds a queue payload with clamped limits", async () => {
 });
 
 test("job submission rejects disallowed language with 400", async () => {
-  const app = createApp(noOpDependencies);
+  const app = await createApp(noOpDependencies);
   const response = await app.inject({
     method: "POST",
     url: "/v1/jobs",
@@ -78,7 +78,7 @@ test("job submission rejects disallowed language with 400", async () => {
 });
 
 test("readiness reports unavailable dependencies", async () => {
-  const app = createApp({
+  const app = await createApp({
     pingRedis: async () => {},
     pingPostgres: async () => {
       throw new Error("connection refused");
@@ -94,7 +94,7 @@ test("readiness reports unavailable dependencies", async () => {
 
 test("rate limiting returns 429 when capacity is exhausted", async () => {
   const tightLimiter = new TokenBucketLimiter({ capacity: 2, refillRate: 1, cost: 1 });
-  const app = createApp({
+  const app = await createApp({
     ...noOpDependencies,
     rateLimiter: tightLimiter,
   });
@@ -134,7 +134,7 @@ test("queue backpressure returns 503 with Retry-After", async () => {
     xLen: async () => 2000, // exceeds max depth
   };
 
-  const app = createApp({
+  const app = await createApp({
     ...noOpDependencies,
     redisClient: mockOverloadedRedis as any,
   });
@@ -153,7 +153,7 @@ test("queue backpressure returns 503 with Retry-After", async () => {
 });
 
 test("GET /v1/jobs/:id returns 404 for unknown job", async () => {
-  const app = createApp(noOpDependencies);
+  const app = await createApp(noOpDependencies);
   const response = await app.inject({ method: "GET", url: "/v1/jobs/00000000-0000-0000-0000-000000000000" });
 
   assert.equal(response.statusCode, 404);
@@ -178,7 +178,7 @@ test("GET /v1/jobs/:id resolves terminal result from Redis if available", async 
     },
   };
 
-  const app = createApp({
+  const app = await createApp({
     ...noOpDependencies,
     redisClient: mockRedis as any,
   });
@@ -195,7 +195,7 @@ test("GET /v1/jobs/:id resolves terminal result from Redis if available", async 
 });
 
 test("CORS preflight responds to OPTIONS request", async () => {
-  const app = createApp(noOpDependencies);
+  const app = await createApp(noOpDependencies);
   const response = await app.inject({
     method: "OPTIONS",
     url: "/v1/jobs",
@@ -207,5 +207,73 @@ test("CORS preflight responds to OPTIONS request", async () => {
 
   assert.equal(response.statusCode, 204);
   assert.equal(response.headers["access-control-allow-origin"], "http://example.com");
+  await app.close();
+});
+
+test("GET /v1/jobs lists recent jobs from Postgres", async () => {
+  const rows = [
+    { id: "job-b", language: "python", status: "queued", exit_code: null, duration_ms: null, peak_memory_bytes: null, error_message: null, created_at: new Date("2026-01-02T00:00:00Z"), completed_at: null },
+    { id: "job-a", language: "cpp", status: "completed", exit_code: 0, duration_ms: 42, peak_memory_bytes: 2400, error_message: null, created_at: new Date("2026-01-01T00:00:00Z"), completed_at: new Date("2026-01-01T00:00:01Z") },
+  ];
+  const mockPool = {
+    query: async (text: string, params: unknown[]) => {
+      if (!text.includes("FROM jobs") || !text.includes("ORDER BY created_at DESC")) {
+        throw new Error(`unexpected query: ${text}`);
+      }
+      assert.equal(params.length, 2);
+      return { rows };
+    },
+  } as any;
+
+  const app = await createApp({ ...noOpDependencies, postgresPool: mockPool });
+  const response = await app.inject({ method: "GET", url: "/v1/jobs?limit=2&status=completed" });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  assert.equal(body.jobs.length, 2);
+  assert.equal(body.jobs[0].id, "job-b");
+  assert.equal(body.jobs[1].duration_ms, 42);
+  assert.equal(body.jobs[1].completed_at, "2026-01-01T00:00:01.000Z");
+  await app.close();
+});
+
+test("GET /v1/jobs returns empty list without Postgres", async () => {
+  const app = await createApp(noOpDependencies);
+  const response = await app.inject({ method: "GET", url: "/v1/jobs" });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { jobs: [] });
+  await app.close();
+});
+
+test("DELETE /v1/jobs/:id signals workers through the cancel key", async () => {
+  const jobId = "cancel-me";
+  const cancelKeys: string[] = [];
+  const mockRedis = {
+    eval: async () => [1, 20, 0],
+    set: async (key: string, _value: string) => {
+      cancelKeys.push(key);
+      return "OK";
+    },
+  };
+
+  const app = await createApp({
+    ...noOpDependencies,
+    redisClient: mockRedis as any,
+  });
+
+  const response = await app.inject({ method: "DELETE", url: `/v1/jobs/${jobId}` });
+  assert.equal(response.statusCode, 202);
+  assert.equal(response.json().status, "cancelling");
+  assert.deepEqual(cancelKeys, [`kairo:job:${jobId}:cancel`]);
+  await app.close();
+});
+
+test("DELETE /v1/jobs/:id returns 503 without a Redis backend", async () => {
+  const app = await createApp(noOpDependencies);
+  const response = await app.inject({ method: "DELETE", url: "/v1/jobs/cancel-me" });
+
+  assert.equal(response.statusCode, 503);
+  assert.equal(response.json().error, "cancellation backend unavailable");
   await app.close();
 });
