@@ -36,7 +36,7 @@ await terminalSub.subscribe("kairo:jobs:terminal", async (message) => {
   }
 });
 
-const app = createApp({
+const app = await createApp({
   pingRedis: async () => {
     await redis.ping();
   },

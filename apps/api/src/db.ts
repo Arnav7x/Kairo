@@ -37,6 +37,23 @@ export interface TerminalExecutionResult {
   error_message?: string;
 }
 
+export interface JobSummary {
+  id: string;
+  language: string;
+  status: string;
+  exit_code: number | null;
+  duration_ms: number | null;
+  peak_memory_bytes: number | null;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface ListJobsOptions {
+  limit?: number;
+  status?: string;
+}
+
 export async function initDb(pool: Pool): Promise<void> {
   const schema = `
     CREATE TABLE IF NOT EXISTS jobs (
@@ -130,6 +147,48 @@ export async function getJobById(pool: Pool, jobId: string): Promise<JobRecord |
     return null;
   }
   return formatJobRow(res.rows[0]);
+}
+
+export async function listJobs(pool: Pool, options: ListJobsOptions = {}): Promise<JobSummary[]> {
+  const limit = Math.min(Math.max(Number(options.limit ?? 25) || 25, 1), 100);
+  const params: unknown[] = [];
+  let where = "";
+  if (options.status) {
+    params.push(options.status);
+    where = `WHERE status = $${params.length}`;
+  }
+
+  const query = `
+    SELECT id, language, status, exit_code, duration_ms, peak_memory_bytes,
+           error_message, created_at, completed_at
+    FROM jobs
+    ${where}
+    ORDER BY created_at DESC
+    LIMIT $${params.length + 1};
+  `;
+  params.push(limit);
+  const res = await pool.query(query, params);
+  return res.rows.map(formatJobSummary);
+}
+
+function formatJobSummary(row: Record<string, unknown>): JobSummary {
+  return {
+    id: String(row.id),
+    language: String(row.language),
+    status: String(row.status),
+    exit_code: row.exit_code !== null && row.exit_code !== undefined ? Number(row.exit_code) : null,
+    duration_ms: row.duration_ms !== null && row.duration_ms !== undefined ? Number(row.duration_ms) : null,
+    peak_memory_bytes:
+      row.peak_memory_bytes !== null && row.peak_memory_bytes !== undefined ? Number(row.peak_memory_bytes) : null,
+    error_message: row.error_message ? String(row.error_message) : null,
+    created_at: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    completed_at:
+      row.completed_at instanceof Date
+        ? row.completed_at.toISOString()
+        : row.completed_at
+          ? String(row.completed_at)
+          : null,
+  };
 }
 
 function formatJobRow(row: Record<string, unknown>): JobRecord {

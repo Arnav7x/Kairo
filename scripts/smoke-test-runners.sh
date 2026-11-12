@@ -18,13 +18,13 @@ test_runner() {
 }
 
 test_runner "python" python3 -c "print('ok')"
-test_runner "node"   node   -e "console.log('ok')"
-test_runner "bash"   bash   -c "echo ok"
-test_runner "c"      gcc    --version
-test_runner "cpp"    g++    --version
-test_runner "go"     go     version
-test_runner "rust"   rustc  --version
-test_runner "java"   java   -version
+test_runner "node" node -e "console.log('ok')"
+test_runner "bash" bash -c "echo ok"
+test_runner "c" gcc --version
+test_runner "cpp" g++ --version
+test_runner "go" go version
+test_runner "rust" rustc --version
+test_runner "java" java -version
 
 echo "==> All runner image smoke tests passed successfully!"
 
