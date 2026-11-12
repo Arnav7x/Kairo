@@ -56,8 +56,30 @@ export interface ListJobsOptions {
 
 export async function initDb(pool: Pool): Promise<void> {
   const schema = `
+    CREATE TABLE IF NOT EXISTS users (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name TEXT NOT NULL,
+      tier TEXT NOT NULL DEFAULT 'authenticated',
+      is_banned BOOLEAN NOT NULL DEFAULT FALSE,
+      concurrency_limit INTEGER NOT NULL DEFAULT 5,
+      daily_cpu_ms_limit BIGINT NOT NULL DEFAULT 600000,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      key_hash TEXT NOT NULL UNIQUE,
+      prefix TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash);
+
     CREATE TABLE IF NOT EXISTS jobs (
       id UUID PRIMARY KEY,
+      user_id UUID REFERENCES users(id) ON DELETE SET NULL,
       language TEXT NOT NULL,
       source_code TEXT NOT NULL,
       stdin TEXT,
@@ -70,29 +92,39 @@ export async function initDb(pool: Pool): Promise<void> {
       duration_ms BIGINT,
       peak_memory_bytes BIGINT,
       error_message TEXT,
+      source_hash TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       completed_at TIMESTAMPTZ
     );
     CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status);
     CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs (created_at);
+    CREATE INDEX IF NOT EXISTS idx_jobs_user_id ON jobs (user_id);
+    CREATE INDEX IF NOT EXISTS idx_jobs_source_hash ON jobs (source_hash);
   `;
   await pool.query(schema);
 }
 
-export async function insertJob(pool: Pool, job: ValidatedJob): Promise<JobRecord> {
+export async function insertJob(
+  pool: Pool,
+  job: ValidatedJob,
+  userId?: string | null,
+  sourceHash?: string | null,
+): Promise<JobRecord> {
   const query = `
-    INSERT INTO jobs (id, language, source_code, stdin, args, limits, status, created_at, updated_at)
-    VALUES ($1, $2, $3, $4, $5, $6, 'queued', NOW(), NOW())
+    INSERT INTO jobs (id, user_id, language, source_code, stdin, args, limits, status, source_hash, created_at, updated_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8, NOW(), NOW())
     RETURNING *;
   `;
   const res = await pool.query(query, [
     job.id,
+    userId ?? null,
     job.language,
     job.source_code,
     job.stdin ?? null,
     job.args ? JSON.stringify(job.args) : null,
     JSON.stringify(job.limits),
+    sourceHash ?? null,
   ]);
   return formatJobRow(res.rows[0]);
 }

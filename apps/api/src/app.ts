@@ -5,7 +5,10 @@ import Fastify from "fastify";
 import type { Pool } from "pg";
 import type WebSocket from "ws";
 
+import { registerAdminRoutes } from "./admin.js";
+import { lookupUserByApiKey, TIER_CONFIGS, type User } from "./auth.js";
 import { getJobById, insertJob, listJobs, updateJobTerminal } from "./db.js";
+import { QuotaManager } from "./quotas.js";
 import {
   checkQueueBackpressure,
   type RedisRateLimiterClient,
@@ -45,10 +48,13 @@ export interface AppDependencies {
    redisClient?: (WsRedisDependencies & RedisRateLimiterClient & {
      xLen?(streamKey: string): Promise<number>;
      get?(key: string): Promise<string | null>;
-     set?(key: string, value: string): Promise<unknown>;
+     set?(key: string, value: string, options?: any): Promise<unknown>;
+     keys?(pattern: string): Promise<string[]>;
+     xInfoGroups?(streamKey: string): Promise<any[]>;
    }) | null;
   postgresPool?: Pool | null;
   rateLimiter?: TokenBucketLimiter;
+  quotaManager?: QuotaManager;
   validationConfig?: ValidationConfig;
   /** Registry snapshot supplied by deployment configuration. */
   languages?: LanguageInfo[];
@@ -66,6 +72,7 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
   });
 
   const defaultLimiter = new TokenBucketLimiter();
+  const quotaManager = dependencies.quotaManager ?? new QuotaManager();
   const timeoutMs = dependencies.requestTimeoutMs ?? 15000;
 
   // Plugins must be awaited before routes are declared, otherwise route
@@ -73,10 +80,16 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
   await app.register(cors, {
     origin: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-API-Key"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-API-Key", "X-Admin-Key"],
   });
 
   await app.register(websocket);
+
+  // Register admin endpoints
+  registerAdminRoutes(app, {
+    postgresPool: dependencies.postgresPool,
+    redisClient: dependencies.redisClient,
+  });
 
   // Request timeout hook for HTTP routes (skip WebSocket upgrade requests)
   app.addHook("onRequest", (request, reply, done) => {
@@ -139,22 +152,46 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
       }
     }
 
-    // 2. Rate limiting check per IP or API Key
-    const apiKey = request.headers["x-api-key"] as string | undefined;
-    const authHeader = request.headers["authorization"] as string | undefined;
-    let identifier = "";
-    if (apiKey && typeof apiKey === "string" && apiKey.trim() !== "") {
-      identifier = `key:${apiKey.trim()}`;
-    } else if (authHeader && authHeader.startsWith("Bearer ")) {
-      identifier = `key:${authHeader.slice(7).trim()}`;
+    // 2. Authentication and User Tier resolution
+    const rawApiKey = (request.headers["x-api-key"] as string | undefined) ||
+      ((request.headers["authorization"] as string | undefined)?.startsWith("Bearer ")
+        ? (request.headers["authorization"] as string).slice(7).trim()
+        : undefined);
+
+    const forwarded = request.headers["x-forwarded-for"] as string | undefined;
+    const clientIp = forwarded ? forwarded.split(",")[0].trim() : request.ip || "127.0.0.1";
+
+    let currentUser: User;
+    if (rawApiKey && dependencies.postgresPool) {
+      const found = await lookupUserByApiKey(dependencies.postgresPool, rawApiKey);
+      if (found) {
+        currentUser = found;
+      } else {
+        return reply.code(401).send({ error: "Invalid API key" });
+      }
     } else {
-      const forwarded = request.headers["x-forwarded-for"] as string | undefined;
-      const ip = forwarded ? forwarded.split(",")[0].trim() : request.ip || "127.0.0.1";
-      identifier = `ip:${ip}`;
+      currentUser = {
+        id: `anon_${clientIp.replace(/[^a-zA-Z0-9]/g, "_")}`,
+        name: "Anonymous",
+        tier: "anonymous",
+        is_banned: false,
+        concurrency_limit: TIER_CONFIGS.anonymous.concurrency_limit,
+        daily_cpu_ms_limit: TIER_CONFIGS.anonymous.daily_cpu_ms_limit,
+        created_at: new Date().toISOString(),
+      };
     }
 
+    if (currentUser.is_banned) {
+      return reply.code(403).send({ error: "Forbidden: user account has been suspended" });
+    }
+
+    // 3. Rate limiting check per user ID or IP
+    const limiterIdentifier = currentUser.id.startsWith("anon_")
+      ? `ip:${clientIp}`
+      : `user:${currentUser.id}`;
+
     const limiter = dependencies.rateLimiter ?? defaultLimiter;
-    const rateResult = await limiter.checkLimit(identifier, dependencies.redisClient);
+    const rateResult = await limiter.checkLimit(limiterIdentifier, dependencies.redisClient);
 
     reply.header("X-RateLimit-Limit", rateResult.limit.toString());
     reply.header("X-RateLimit-Remaining", rateResult.remaining.toString());
@@ -169,24 +206,62 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
       });
     }
 
-    // 3. Validation and limit clamping
-    const validation = validateJobSubmission(request.body, dependencies.validationConfig);
+    // 4. Validation and limit clamping
+    // If validationConfig is explicitly supplied (e.g. in tests or server config), honor it.
+    // Otherwise fallback to tier config defaults.
+    let validationConfig = dependencies.validationConfig;
+    if (!validationConfig) {
+      const tierConfig = TIER_CONFIGS[currentUser.tier] ?? TIER_CONFIGS.anonymous;
+      validationConfig = {
+        ...DEFAULT_CONFIG,
+        maxTimeoutMs: tierConfig.max_timeout_ms,
+        maxMemoryMb: tierConfig.max_memory_mb,
+      };
+    }
+
+    const validation = validateJobSubmission(request.body, validationConfig);
     if (!validation.success) {
       return reply.code(validation.statusCode).send({ error: validation.error });
     }
 
     const job = validation.job;
 
-    // 4. Postgres persistence: create the job on submit
+    // 5. Quota, Concurrency, and Deduplication enforcement
+    const quotaResult = await quotaManager.checkAndAcquire(
+      currentUser,
+      job.language,
+      job.source_code,
+      job.limits.timeout_ms,
+      job.id,
+      dependencies.redisClient as any,
+      0, // Dedupe window disabled on generic anonymous burst submissions unless requested
+    );
+
+    if (!quotaResult.allowed) {
+      if (quotaResult.retryAfter) {
+        reply.header("Retry-After", quotaResult.retryAfter.toString());
+      }
+      return reply.code(quotaResult.statusCode ?? 429).send({
+        error: quotaResult.error,
+        retry_after: quotaResult.retryAfter,
+      });
+    }
+
+    // 6. Postgres persistence: create the job on submit
     if (dependencies.postgresPool) {
       try {
-        await insertJob(dependencies.postgresPool, job);
+        await insertJob(
+          dependencies.postgresPool,
+          job,
+          currentUser.id.startsWith("anon_") ? null : currentUser.id,
+          quotaResult.sourceHash,
+        );
       } catch (error) {
         request.log.error({ error, jobId: job.id }, "failed to insert job into Postgres");
       }
     }
 
-    // 5. Enqueue job to Redis Stream
+    // 7. Enqueue job to Redis Stream
     await dependencies.enqueue(job);
 
     return reply.code(202).send({
