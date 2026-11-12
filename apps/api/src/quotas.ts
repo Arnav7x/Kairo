@@ -32,6 +32,7 @@ export function todayDateKey(): string {
  * KEYS[1] = in-flight key (e.g. kairo:inflight:<userId>)
  * KEYS[2] = daily CPU ms key (e.g. kairo:dailycpu:<userId>:<date>)
  * KEYS[3] = dedupe key (e.g. kairo:dedupe:<sourceHash>)
+ * KEYS[4] = per-job CPU reservation key
  *
  * ARGV[1] = max_concurrency
  * ARGV[2] = max_daily_cpu_ms
@@ -46,6 +47,7 @@ export const LUA_CHECK_AND_ACQUIRE_QUOTA = `
 local inflight_key = KEYS[1]
 local daily_key = KEYS[2]
 local dedupe_key = KEYS[3]
+local reservation_key = KEYS[4]
 
 local max_concurrency = tonumber(ARGV[1])
 local max_daily_cpu = tonumber(ARGV[2])
@@ -76,6 +78,10 @@ end
 -- Allowed: increment in-flight
 redis.call("INCR", inflight_key)
 redis.call("EXPIRE", inflight_key, 3600)
+-- Reserve budget at admission so queued work counts against the daily limit.
+redis.call("INCRBY", daily_key, estimated_cpu)
+redis.call("EXPIRE", daily_key, 172800)
+redis.call("SET", reservation_key, estimated_cpu, "EX", 172800)
 
 -- Mark dedupe key if requested
 if dedupe_window > 0 and dedupe_key ~= "" then
@@ -89,6 +95,7 @@ export class QuotaManager {
   private inMemoryInflight = new Map<string, number>();
   private inMemoryDailyCpu = new Map<string, number>();
   private inMemoryDedupe = new Map<string, { jobId: string; expiresAt: number }>();
+  private inMemoryReservations = new Map<string, number>();
 
   async checkAndAcquire(
     user: User,
@@ -114,9 +121,10 @@ export class QuotaManager {
         const inflightKey = `kairo:user:${user.id}:inflight`;
         const dailyKey = `kairo:user:${user.id}:daily_cpu:${dateKey}`;
         const dedupeKey = enableDedupeWindowSeconds > 0 ? `kairo:dedupe:${sourceHash}` : "";
+        const reservationKey = `kairo:job:${jobId}:cpu_reservation`;
 
         const result = (await redis.eval(LUA_CHECK_AND_ACQUIRE_QUOTA, {
-          keys: [inflightKey, dailyKey, dedupeKey],
+          keys: [inflightKey, dailyKey, dedupeKey, reservationKey],
           arguments: [
             String(maxConcurrency),
             String(maxDailyCpuMs),
@@ -194,6 +202,8 @@ export class QuotaManager {
     }
 
     this.inMemoryInflight.set(user.id, currentInflight + 1);
+    this.inMemoryDailyCpu.set(`${user.id}:${dateKey}`, currentDaily + estimatedTimeoutMs);
+    this.inMemoryReservations.set(jobId, estimatedTimeoutMs);
     if (enableDedupeWindowSeconds > 0) {
       this.inMemoryDedupe.set(sourceHash, { jobId, expiresAt: now + enableDedupeWindowSeconds * 1000 });
     }
@@ -205,12 +215,14 @@ export class QuotaManager {
     userId: string,
     durationMs: number,
     redis?: QuotasRedisClient | null,
+    jobId?: string,
   ): Promise<void> {
     const dateKey = todayDateKey();
     if (redis) {
       try {
         const inflightKey = `kairo:user:${userId}:inflight`;
         const dailyKey = `kairo:user:${userId}:daily_cpu:${dateKey}`;
+        const reservationKey = jobId ? `kairo:job:${jobId}:cpu_reservation` : "";
         if (typeof redis.eval === "function") {
           await redis.eval(
             `
@@ -218,11 +230,18 @@ export class QuotaManager {
             if current > 0 then
               redis.call("DECR", KEYS[1])
             end
-            redis.call("INCRBY", KEYS[2], tonumber(ARGV[1]))
+            local reserved = 0
+            if KEYS[3] ~= "" then
+              reserved = tonumber(redis.call("GET", KEYS[3]) or "0")
+              redis.call("DEL", KEYS[3])
+            end
+            local adjustment = tonumber(ARGV[1]) - reserved
+            if adjustment ~= 0 then redis.call("INCRBY", KEYS[2], adjustment) end
+            if tonumber(redis.call("GET", KEYS[2]) or "0") < 0 then redis.call("SET", KEYS[2], "0") end
             redis.call("EXPIRE", KEYS[2], 86400 * 2)
             return 1
             `,
-            { keys: [inflightKey, dailyKey], arguments: [String(Math.max(0, durationMs))] },
+            { keys: [inflightKey, dailyKey, reservationKey], arguments: [String(Math.max(0, durationMs))] },
           );
           return;
         }
@@ -235,7 +254,9 @@ export class QuotaManager {
     if (cur > 0) {
       this.inMemoryInflight.set(userId, cur - 1);
     }
+    const reservation = jobId ? (this.inMemoryReservations.get(jobId) ?? 0) : 0;
+    if (jobId) this.inMemoryReservations.delete(jobId);
     const curDaily = this.inMemoryDailyCpu.get(`${userId}:${dateKey}`) ?? 0;
-    this.inMemoryDailyCpu.set(`${userId}:${dateKey}`, curDaily + Math.max(0, durationMs));
+    this.inMemoryDailyCpu.set(`${userId}:${dateKey}`, Math.max(0, curDaily + Math.max(0, durationMs) - reservation));
   }
 }

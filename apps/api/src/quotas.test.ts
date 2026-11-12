@@ -66,6 +66,30 @@ test("QuotaManager enforces daily CPU seconds quota", async () => {
   assert.match(r2.error ?? "", /daily CPU quota/i);
 });
 
+test("QuotaManager reserves CPU at enqueue and reconciles actual execution time", async () => {
+  const qm = new QuotaManager();
+  const user: User = {
+    id: "user-reservation",
+    name: "Tester",
+    tier: "anonymous",
+    is_banned: false,
+    concurrency_limit: 10,
+    daily_cpu_ms_limit: 5000,
+    created_at: new Date().toISOString(),
+  };
+
+  assert.equal((await qm.checkAndAcquire(user, "python", "print(1)", 4000, "job-reserved", null, 0)).allowed, true);
+  // This must be rejected before job-reserved completes: its 4s budget is
+  // already reserved, so admission cannot be gamed by a large queued burst.
+  const denied = await qm.checkAndAcquire(user, "python", "print(2)", 2000, "job-denied", null, 0);
+  assert.equal(denied.allowed, false);
+  assert.match(denied.error ?? "", /daily CPU quota/i);
+
+  // The job actually used only 1s; reconciliation returns the unused 3s.
+  await qm.releaseInflightAndRecordUsage(user.id, 1000, null, "job-reserved");
+  assert.equal((await qm.checkAndAcquire(user, "python", "print(3)", 4000, "job-after-reconcile", null, 0)).allowed, true);
+});
+
 test("QuotaManager deduplicates identical runs within window", async () => {
   const qm = new QuotaManager();
   const testUser: User = {

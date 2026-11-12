@@ -31,14 +31,17 @@ export interface TierConfig {
 
 export const TIER_CONFIGS: Record<UserTier, TierConfig> = {
   anonymous: {
-    concurrency_limit: 10,
+    // Deliberately below the default worker pool: an anonymous burst cannot
+    // occupy every worker and starve other users.
+    concurrency_limit: 2,
     daily_cpu_ms_limit: 600 * 1000, // 600 seconds of CPU per day
     default_timeout_ms: 10000,
     max_timeout_ms: 30000,
     max_memory_mb: 1024,
   },
   authenticated: {
-    concurrency_limit: 25,
+    // Still higher than anonymous, while leaving capacity for other users.
+    concurrency_limit: 3,
     daily_cpu_ms_limit: 3600 * 1000, // 1 hour of CPU per day
     default_timeout_ms: 15000,
     max_timeout_ms: 60000,

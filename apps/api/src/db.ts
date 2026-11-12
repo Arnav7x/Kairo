@@ -54,6 +54,17 @@ export interface ListJobsOptions {
   status?: string;
 }
 
+/** Data needed by the accounting path; deliberately not exposed by job APIs. */
+export interface JobAccountingRecord {
+  userId: string | null;
+}
+
+export async function getJobAccountingRecord(pool: Pool, jobId: string): Promise<JobAccountingRecord | null> {
+  const res = await pool.query("SELECT user_id FROM jobs WHERE id = $1", [jobId]);
+  if (res.rowCount === 0) return null;
+  return { userId: res.rows[0].user_id ? String(res.rows[0].user_id) : null };
+}
+
 export async function initDb(pool: Pool): Promise<void> {
   const schema = `
     CREATE TABLE IF NOT EXISTS users (

@@ -247,6 +247,18 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
       });
     }
 
+    // Keep the quota owner beside the job so terminal accounting also works
+    // for anonymous users, which intentionally have no database user row.
+    if (dependencies.redisClient && typeof dependencies.redisClient.set === "function") {
+      try {
+        await dependencies.redisClient.set(`kairo:job:${job.id}:quota_owner`, currentUser.id, { EX: 172800 });
+      } catch (error) {
+        await quotaManager.releaseInflightAndRecordUsage(currentUser.id, 0, dependencies.redisClient as any, job.id);
+        request.log.error({ error, jobId: job.id }, "failed to persist quota owner");
+        return reply.code(503).send({ error: "quota backend unavailable; job was not accepted" });
+      }
+    }
+
     // 6. Postgres persistence: create the job on submit
     if (dependencies.postgresPool) {
       try {
@@ -261,8 +273,20 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
       }
     }
 
-    // 7. Enqueue job to Redis Stream
-    await dependencies.enqueue(job);
+    // 7. Enqueue job to Redis Stream. If the queue is unavailable, undo the
+    // admission reservation so a failed submission cannot consume quota.
+    try {
+      await dependencies.enqueue(job);
+    } catch (error) {
+      await quotaManager.releaseInflightAndRecordUsage(
+        currentUser.id,
+        0,
+        dependencies.redisClient as any,
+        job.id,
+      );
+      request.log.error({ error, jobId: job.id }, "failed to enqueue job");
+      return reply.code(503).send({ error: "queue unavailable; job was not accepted" });
+    }
 
     return reply.code(202).send({
       job_id: job.id,

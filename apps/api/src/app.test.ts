@@ -128,6 +128,23 @@ test("rate limiting returns 429 when capacity is exhausted", async () => {
   await app.close();
 });
 
+test("anonymous in-flight cap preserves worker capacity for other users", async () => {
+  const app = await createApp(noOpDependencies);
+  const submit = (source_code: string) => app.inject({
+    method: "POST",
+    url: "/v1/jobs",
+    headers: { "x-forwarded-for": "203.0.113.10" },
+    payload: { language: "python", source_code },
+  });
+
+  assert.equal((await submit("print('one')")).statusCode, 202);
+  assert.equal((await submit("print('two')")).statusCode, 202);
+  const blocked = await submit("print('three')");
+  assert.equal(blocked.statusCode, 429);
+  assert.match(blocked.json().error, /concurrency limit/i);
+  await app.close();
+});
+
 test("queue backpressure returns 503 with Retry-After", async () => {
   const mockOverloadedRedis = {
     eval: async () => [1, 20, 0],
