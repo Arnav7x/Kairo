@@ -3,6 +3,8 @@ set -euo pipefail
 
 echo "==> Running runner image smoke tests..."
 
+# test_runner <lang> <args...>
+# Passes all arguments after lang directly to docker run, preserving quoting.
 test_runner() {
   local lang="$1"
   shift
