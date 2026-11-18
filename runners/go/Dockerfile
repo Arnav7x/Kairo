@@ -12,7 +12,8 @@ WORKDIR /workspace
 
 ENV GOCACHE=/tmp/go-cache \
     GOPATH=/tmp/go \
-    CGO_ENABLED=0
+    CGO_ENABLED=0 \
+    GOMEMLIMIT=450MiB
 
 CMD ["./main"]
 
