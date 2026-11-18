@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Arnav7x/kairo/internal/events"
+	"github.com/Arnav7x/kairo/internal/observability"
 )
 
 const (
@@ -77,6 +78,7 @@ func (c *outputCollector) write(stream events.Stream, data []byte) (int, error) 
 		c.limited = true
 	}
 	destination.Write(accepted)
+	observability.OutputBytesTotal.WithLabelValues(string(stream), c.phase).Add(float64(len(accepted)))
 	c.appendFramesLocked(stream, accepted)
 	if c.limited {
 		c.flushLocked(stream)
