@@ -33,6 +33,9 @@ func newTestDockerClient(t *testing.T) *client.Client {
 	if err != nil {
 		t.Fatalf("failed to connect to Docker: %v", err)
 	}
+	if _, err := cli.Ping(context.Background()); err != nil {
+		t.Skipf("Docker daemon is unavailable for integration test: %v", err)
+	}
 	return cli
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Arnav7x/kairo/internal/events"
 	"github.com/Arnav7x/kairo/internal/languages"
+	"github.com/Arnav7x/kairo/internal/observability"
 	"github.com/Arnav7x/kairo/internal/queue"
 	"github.com/Arnav7x/kairo/internal/sandbox"
 	"github.com/redis/go-redis/v9"
@@ -170,7 +171,12 @@ func (r *Runner) process(message queue.Message) error {
 	}
 
 	r.active.Add(1)
-	defer r.active.Add(-1)
+	observability.WorkerActiveJobs.Inc()
+	defer func() {
+		r.active.Add(-1)
+		observability.WorkerActiveJobs.Dec()
+	}()
+	startTime := time.Now()
 	execCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	stopCancelWatch := r.watchCancellation(execCtx, cancel, message.Job.ID)
@@ -184,6 +190,8 @@ func (r *Runner) process(message queue.Message) error {
 	if err != nil {
 		return err
 	}
+	observability.JobDuration.WithLabelValues(message.Job.Language).Observe(time.Since(startTime).Seconds())
+	observability.JobsTotal.WithLabelValues(string(result.Status), message.Job.Language).Inc()
 	return r.complete(ctx, message, result)
 }
 

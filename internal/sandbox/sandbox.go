@@ -12,6 +12,7 @@ import (
 
 	"github.com/Arnav7x/kairo/internal/events"
 	"github.com/Arnav7x/kairo/internal/languages"
+	"github.com/Arnav7x/kairo/internal/observability"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
@@ -201,6 +202,8 @@ func (d *DockerSandbox) runPhase(ctx context.Context, spec ExecutionSpec, worksp
 		hostConfig.Runtime = d.runtime
 	}
 
+	createStart := time.Now()
+
 	// 3. Create Container
 	createResp, err := d.dockerClient.ContainerCreate(execCtx, containerConfig, hostConfig, nil, nil, "")
 	if err != nil {
@@ -256,6 +259,12 @@ func (d *DockerSandbox) runPhase(ctx context.Context, spec ExecutionSpec, worksp
 			Duration:     time.Since(startTime),
 		}, nil
 	}
+
+	runtimeName := d.runtime
+	if runtimeName == "" {
+		runtimeName = "runc"
+	}
+	observability.ContainerStartDuration.WithLabelValues(runtimeName, spec.Language.ID).Observe(time.Since(createStart).Seconds())
 
 	// 7. Stream and demultiplex output while the program runs.
 	maxOutput := spec.Limits.OutputBytes

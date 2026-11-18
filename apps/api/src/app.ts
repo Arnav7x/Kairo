@@ -8,6 +8,7 @@ import type WebSocket from "ws";
 import { registerAdminRoutes } from "./admin.js";
 import { lookupUserByApiKey, TIER_CONFIGS, type User } from "./auth.js";
 import { getJobById, insertJob, listJobs, updateJobTerminal } from "./db.js";
+import { register as prometheusRegistry, jobsTotal, queueDepthGauge } from "./metrics.js";
 import { QuotaManager } from "./quotas.js";
 import {
   checkQueueBackpressure,
@@ -110,6 +111,21 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
 
   // Health and readiness endpoints
   app.get("/healthz", async () => ({ status: "ok" }));
+
+  // Prometheus metrics endpoint
+  app.get("/metrics", async (_request, reply) => {
+    if (dependencies.redisClient && typeof dependencies.redisClient.xLen === "function") {
+      try {
+        const depth = await dependencies.redisClient.xLen("kairo:jobs");
+        queueDepthGauge.set(depth);
+      } catch {
+        // continue if redis unavailable
+      }
+    }
+    const metrics = await prometheusRegistry.metrics();
+    reply.header("Content-Type", prometheusRegistry.contentType);
+    return reply.send(metrics);
+  });
 
   // This is deliberately a registry view, rather than a hand-maintained route
   // list: callers can discover exactly which language IDs submissions accept.
@@ -277,6 +293,7 @@ export async function createApp(dependencies: AppDependencies): Promise<FastifyI
     // admission reservation so a failed submission cannot consume quota.
     try {
       await dependencies.enqueue(job);
+      jobsTotal.inc({ status: "queued", language: job.language });
     } catch (error) {
       await quotaManager.releaseInflightAndRecordUsage(
         currentUser.id,
